@@ -42,7 +42,7 @@ int main(int argc, char *argv[]) {
     unsigned short num_tables = (static_cast<unsigned char>(buffer[1]) |
                                  (static_cast<unsigned char>(buffer[0]) << 8));
 
-    std::cout << "number of tables:" << num_tables << std::endl;
+    std::cout << "number of tables: " << num_tables << std::endl;
   }
 
   return 0;
