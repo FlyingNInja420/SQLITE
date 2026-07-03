@@ -130,7 +130,6 @@ int main(int argc, char *argv[]) {
   if (!database_file)
     return 1;
 
-  // Grab the page size (we need this for traversing later!)
   database_file.seekg(16);
   uint16_t page_size = read_integer(database_file, 2);
 
