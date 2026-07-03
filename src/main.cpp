@@ -177,7 +177,8 @@ int main(int argc, char *argv[]) {
       }
     }
     std::cout << std::endl;
-  } else if (command.find("SELECT COUNT(*)") != std::string::npos) {
+  } else if (command.find("SELECT COUNT(*)") != std::string::npos or
+             command.find("select count(*)") != std::string::npos) {
     std::string target_table = command.substr(command.find_last_of(' ') + 1);
 
     uint32_t root_page = get_table_root_page(database_file, target_table);
