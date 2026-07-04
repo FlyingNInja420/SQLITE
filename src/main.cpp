@@ -354,7 +354,6 @@ int main(int argc, char *argv[]) {
           for (int i = 1; i <= words.size() - 3; i++) {
             while (words[i].back() == ',')
               words[i].pop_back();
-            std::cout << words[i] << "\n";
             table.print_column(words[i]);
             info.push_back(table.retrieval);
             table.retrieval.clear();
@@ -362,7 +361,7 @@ int main(int argc, char *argv[]) {
           for (int i = 0; i < info[0].size(); i++) {
             for (int j = 0; j < info.size(); j++) {
               std::cout << info[i][j];
-              if (j == info.size() - 1)
+              if (j != info.size() - 1)
                 std::cout << "|";
               else
                 std::cout << "\n";
