@@ -372,7 +372,7 @@ int main(int argc, char *argv[]) {
       }
     }
     std::cout << words.back() << "\n";
-    if (words[words.size() - 4] != "where") {
+    if (words[words.size() - 4] != "WHERE") {
       // The table name is always the last word
       std::string table_name = words.back();
 
