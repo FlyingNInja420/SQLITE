@@ -99,6 +99,7 @@ private:
   uint32_t root_page;
   uint16_t page_size;
   std::string sql;
+  int rowid_col_idx = -1; // <-- Add this to track the RowID alias column
 
   int get_column_index(const std::string &target_col) {
     size_t start = sql.find('(');
@@ -174,7 +175,8 @@ private:
 
         db.seekg(offset + cell_ptr);
         db.read_var(); // Payload Size
-        db.read_var(); // RowID
+        uint64_t row_id =
+            db.read_var(); // <-- Save the RowID instead of throwing it away!
 
         uint64_t header_start = db.tellg();
         uint64_t size_of_header = db.read_var();
@@ -194,7 +196,10 @@ private:
 
         db.seekg(header_start + size_of_header + data_offset);
 
-        if (col_index < serial_types.size()) {
+        if (col_index == rowid_col_idx) {
+          // If this is the INTEGER PRIMARY KEY column, use the RowID we saved!
+          retrieval.push_back(std::to_string(static_cast<int64_t>(row_id)));
+        } else if (col_index < serial_types.size()) {
           uint64_t target_serial = serial_types[col_index];
           uint16_t data_size = decode_size(target_serial);
 
@@ -236,7 +241,31 @@ private:
 
 public:
   Table(DatabaseUtils &db_ref, uint32_t root, uint16_t size, std::string schema)
-      : db(db_ref), root_page(root), page_size(size), sql(schema) {}
+      : db(db_ref), root_page(root), page_size(size), sql(schema) {
+
+    // Automatically scan the schema to find which column is the RowID alias
+    if (!sql.empty()) {
+      size_t start = sql.find('(');
+      size_t end = sql.find_last_of(')');
+      if (start != std::string::npos && end != std::string::npos) {
+        std::string cols = sql.substr(start + 1, end - start - 1);
+        std::stringstream ss(cols);
+        std::string col;
+        int idx = 0;
+        while (std::getline(ss, col, ',')) {
+          std::string lower_col = col;
+          std::transform(lower_col.begin(), lower_col.end(), lower_col.begin(),
+                         ::tolower);
+          // Catch any variation like "INTEGER PRIMARY KEY AUTOINCREMENT"
+          if (lower_col.find("integer primary key") != std::string::npos) {
+            rowid_col_idx = idx;
+            break;
+          }
+          idx++;
+        }
+      }
+    }
+  }
 
   bool is_valid() const { return root_page != 0; }
   uint64_t count_rows() { return count_rows_recursive(root_page); }
