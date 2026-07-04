@@ -8,6 +8,10 @@
 #include <string>
 #include <vector>
 
+// ---------------------------------------------------------
+// 1. LOW-LEVEL BYTE UTILITIES
+// ---------------------------------------------------------
+
 uint16_t decode_size(uint64_t serial_type) {
   if (serial_type >= 13 && serial_type % 2 == 1)
     return (serial_type - 13) / 2; // TEXT
@@ -66,12 +70,17 @@ public:
   }
 };
 
+// ---------------------------------------------------------
+// 2. TABLE CLASS
+// ---------------------------------------------------------
+
 class Table {
 private:
   DatabaseUtils &db;
   uint32_t root_page;
   uint16_t page_size;
   std::string sql;
+
   int get_column_index(const std::string &target_col) {
     size_t start = sql.find('(');
     size_t end = sql.find_last_of(')');
@@ -105,10 +114,10 @@ private:
     uint16_t num_cells = db.read_integer(2);
 
     if (page_type == 0x0D)
-      return num_cells; // Leaf
+      return num_cells;
 
     uint64_t total_rows = 0;
-    if (page_type == 0x05) { // Interior
+    if (page_type == 0x05) {
       for (int i = 0; i < num_cells; i++) {
         db.seekg(offset + 12 + (i * 2));
         uint16_t cell_ptr = db.read_integer(2);
@@ -164,11 +173,13 @@ private:
           uint64_t target_serial = serial_types[col_index];
           uint16_t data_size = decode_size(target_serial);
 
-          if (target_serial >= 13 && target_serial % 2 == 1) {
+          if (target_serial >= 13 && target_serial % 2 == 1) { // TEXT
             std::string column_data(data_size, '\0');
             db.read(&column_data[0], data_size);
-            // std::cout << column_data << std::endl;
             retrieval.push_back(column_data);
+          } else {
+            // Push an empty string so the indices don't get misaligned on NULLs
+            retrieval.push_back("");
           }
         }
       }
@@ -196,6 +207,7 @@ public:
   bool is_valid() const { return root_page != 0; }
 
   uint64_t count_rows() { return count_rows_recursive(root_page); }
+
   std::vector<std::string> retrieval;
 
   void print_column(const std::string &col_name) {
@@ -207,6 +219,10 @@ public:
     }
   }
 };
+
+// ---------------------------------------------------------
+// 3. DATABASE CLASS
+// ---------------------------------------------------------
 
 struct SchemaEntry {
   std::string type;
@@ -304,6 +320,10 @@ public:
   }
 };
 
+// ---------------------------------------------------------
+// 4. MAIN (The Text Router)
+// ---------------------------------------------------------
+
 int main(int argc, char *argv[]) {
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
@@ -315,7 +335,6 @@ int main(int argc, char *argv[]) {
   if (!database_file)
     return 1;
 
-  // Initialize the entire database system in one line
   Database db(database_file);
 
   std::string command = argv[2];
@@ -339,25 +358,49 @@ int main(int argc, char *argv[]) {
     std::vector<std::string> words;
     std::string cur;
     std::stringstream ss(command);
-    while (std::getline(ss, cur, ' '))
-      words.push_back(cur);
 
-    std::vector<std::vector<std::string>> info;
-    for (int i = 1; i <= words.size() - 3; i++) {
-      while (words[i].back() == ',')
-        words[i].pop_back();
-      Table table = db.get_table(words[i]);
-      table.print_column(words[i]);
-      info.push_back(table.retrieval);
-      table.retrieval.clear();
+    // Safety against double spaces
+    while (std::getline(ss, cur, ' ')) {
+      if (!cur.empty())
+        words.push_back(cur);
     }
-    for (int i = 0; i < info[0].size(); i++) {
-      for (int j = 0; j < info.size(); j++) {
-        std::cout << info[j][i];
-        if (j != info.size() - 1)
-          std::cout << "|";
-        else
-          std::cout << "\n";
+
+    if (words.size() >= 4) {
+      // The table name is always the last word
+      std::string table_name = words.back();
+
+      // FIX 1: Fetch the table ONCE, outside the loop!
+      Table table = db.get_table(table_name);
+
+      if (!table.is_valid()) {
+        std::cerr << "Table not found!" << std::endl;
+        return 0;
+      }
+
+      std::vector<std::vector<std::string>> info;
+
+      // Loop over the columns (words[1] to words[size-3])
+      for (int i = 1; i <= words.size() - 3; i++) {
+        while (!words[i].empty() && words[i].back() == ',') {
+          words[i].pop_back();
+        }
+
+        table.print_column(words[i]);
+        info.push_back(table.retrieval);
+        table.retrieval.clear();
+      }
+
+      // Output formatting
+      if (!info.empty() && !info[0].empty()) {
+        for (int i = 0; i < info[0].size(); i++) {
+          for (int j = 0; j < info.size(); j++) {
+            std::cout << info[j][i];
+            if (j != info.size() - 1)
+              std::cout << "|";
+            else
+              std::cout << "\n";
+          }
+        }
       }
     }
   }
