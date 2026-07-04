@@ -371,7 +371,7 @@ int main(int argc, char *argv[]) {
         words.erase(words.begin() + i + 1, words.end());
       }
     }
-    // std::cout << words.back() << "\n";
+    std::cout << words.back() << "\n";
     if (words[words.size() - 4] != "where") {
       // The table name is always the last word
       std::string table_name = words.back();
