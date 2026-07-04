@@ -343,7 +343,7 @@ int main(int argc, char *argv[]) {
       words.push_back(cur);
 
     if (words.size() >= 4) {
-      std::string from_keyword = words[2];
+      std::string from_keyword = words[words.size() - 2];
       std::transform(from_keyword.begin(), from_keyword.end(),
                      from_keyword.begin(), ::toupper);
 
