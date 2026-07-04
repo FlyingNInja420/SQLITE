@@ -348,27 +348,26 @@ int main(int argc, char *argv[]) {
                      from_keyword.begin(), ::toupper);
 
       if (from_keyword == "FROM") {
-        Table table = db.get_table(words[words.size() - 1]);
-        if (table.is_valid()) {
-          std::vector<std::vector<std::string>> info;
-          for (int i = 1; i <= words.size() - 3; i++) {
+        std::vector<std::vector<std::string>> info;
+        for (int i = 1; i <= words.size() - 3; i++) {
+          Table table = db.get_table(words[i]);
+          if (table.is_valid()) {
             while (words[i].back() == ',')
               words[i].pop_back();
             table.print_column(words[i]);
             info.push_back(table.retrieval);
             table.retrieval.clear();
           }
-          for (int i = 0; i < info[0].size(); i++) {
-            for (int j = 0; j < info.size(); j++) {
-              std::cout << info[i][j];
-              if (j != info.size() - 1)
-                std::cout << "|";
-              else
-                std::cout << "\n";
-            }
+        }
+        for (int i = 0; i < info[0].size(); i++) {
+          for (int j = 0; j < info.size(); j++) {
+            std::cout << info[i][j];
+            if (j != info.size() - 1)
+              std::cout << "|";
+            else
+              std::cout << "\n";
           }
-        } else
-          std::cerr << "Table not found!" << std::endl;
+        }
       }
     }
   }
