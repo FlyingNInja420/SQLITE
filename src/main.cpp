@@ -367,11 +367,11 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < words.size(); i++) {
       if (words[i][0] == char(39)) {
         for (int j = i + 1; j < words.size(); j++)
-          words[i] += words[j];
+          words[i] += " " + words[j];
         words.erase(words.begin() + i + 1, words.end());
       }
     }
-    std::cout << words.back() << "\n";
+    // std::cout << words.back() << "\n";
     if (words[words.size() - 4] != "where") {
       // The table name is always the last word
       std::string table_name = words.back();
