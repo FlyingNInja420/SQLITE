@@ -365,7 +365,7 @@ int main(int argc, char *argv[]) {
         words.push_back(cur);
     }
 
-    if (words.size() >= 4) {
+    if (words[words.size() - 4] != "where") {
       // The table name is always the last word
       std::string table_name = words.back();
 
@@ -393,6 +393,51 @@ int main(int argc, char *argv[]) {
       // Output formatting
       if (!info.empty() && !info[0].empty()) {
         for (int i = 0; i < info[0].size(); i++) {
+          for (int j = 0; j < info.size(); j++) {
+            std::cout << info[j][i];
+            if (j != info.size() - 1)
+              std::cout << "|";
+            else
+              std::cout << "\n";
+          }
+        }
+      }
+    } else {
+      // The table name is always the last word
+      std::string table_name = words[words.size() - 5];
+      // FIX 1: Fetch the table ONCE, outside the loop!
+      Table table = db.get_table(table_name);
+
+      if (!table.is_valid()) {
+        std::cerr << "Table not found!" << std::endl;
+        return 0;
+      }
+
+      std::vector<std::vector<std::string>> info;
+
+      // Loop over the columns (words[1] to words[size-3])
+      for (int i = 1; i <= words.size() - 7; i++) {
+        while (!words[i].empty() && words[i].back() == ',') {
+          words[i].pop_back();
+        }
+
+        table.print_column(words[i]);
+        info.push_back(table.retrieval);
+        table.retrieval.clear();
+      }
+
+      std::string cond_col_match =
+          words.back().substr(1, words.back().size() - 2);
+      std::string cond_col = words[words.size() - 3];
+      table.print_column(cond_col);
+      std::vector<std::string> cond_col_data = table.retrieval;
+      table.retrieval.clear();
+
+      // Output formatting
+      if (!info.empty() && !info[0].empty()) {
+        for (int i = 0; i < info[0].size(); i++) {
+          if (cond_col_data[i] != cond_col_match)
+            continue;
           for (int j = 0; j < info.size(); j++) {
             std::cout << info[j][i];
             if (j != info.size() - 1)
