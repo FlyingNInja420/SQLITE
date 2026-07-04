@@ -354,6 +354,7 @@ int main(int argc, char *argv[]) {
           for (int i = 1; i <= words.size() - 3; i++) {
             while (words[i].back() == ',')
               words[i].pop_back();
+            std::cout << words[i] << "\n";
             table.print_column(words[i]);
             info.push_back(table.retrieval);
             table.retrieval.clear();
