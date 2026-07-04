@@ -342,32 +342,22 @@ int main(int argc, char *argv[]) {
     while (std::getline(ss, cur, ' '))
       words.push_back(cur);
 
-    if (words.size() >= 4) {
-      std::string from_keyword = words[words.size() - 2];
-      std::transform(from_keyword.begin(), from_keyword.end(),
-                     from_keyword.begin(), ::toupper);
-
-      if (from_keyword == "FROM") {
-        std::vector<std::vector<std::string>> info;
-        for (int i = 1; i <= words.size() - 3; i++) {
-          Table table = db.get_table(words[i]);
-          if (table.is_valid()) {
-            while (words[i].back() == ',')
-              words[i].pop_back();
-            table.print_column(words[i]);
-            info.push_back(table.retrieval);
-            table.retrieval.clear();
-          }
-        }
-        for (int i = 0; i < info[0].size(); i++) {
-          for (int j = 0; j < info.size(); j++) {
-            std::cout << info[i][j];
-            if (j != info.size() - 1)
-              std::cout << "|";
-            else
-              std::cout << "\n";
-          }
-        }
+    std::vector<std::vector<std::string>> info;
+    for (int i = 1; i <= words.size() - 3; i++) {
+      while (words[i].back() == ',')
+        words[i].pop_back();
+      Table table = db.get_table(words[i]);
+      table.print_column(words[i]);
+      info.push_back(table.retrieval);
+      table.retrieval.clear();
+    }
+    for (int i = 0; i < info[0].size(); i++) {
+      for (int j = 0; j < info.size(); j++) {
+        std::cout << info[j][i];
+        if (j != info.size() - 1)
+          std::cout << "|";
+        else
+          std::cout << "\n";
       }
     }
   }
