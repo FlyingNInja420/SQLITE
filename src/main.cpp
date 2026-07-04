@@ -364,7 +364,13 @@ int main(int argc, char *argv[]) {
       if (!cur.empty())
         words.push_back(cur);
     }
-
+    for (int i = 0; i < words.size(); i++) {
+      if (words[i][0] == char(39)) {
+        for (int j = i + 1; j < words.size(); j++)
+          words[i] += words[j];
+        words.erase(words.begin() + i + 1, words.end());
+      }
+    }
     if (words[words.size() - 4] != "where") {
       // The table name is always the last word
       std::string table_name = words.back();
@@ -415,7 +421,6 @@ int main(int argc, char *argv[]) {
 
       std::vector<std::vector<std::string>> info;
 
-      // Loop over the columns (words[1] to words[size-3])
       for (int i = 1; i <= words.size() - 7; i++) {
         while (!words[i].empty() && words[i].back() == ',') {
           words[i].pop_back();
