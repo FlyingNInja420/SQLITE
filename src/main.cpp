@@ -68,6 +68,25 @@ public:
     }
     return result;
   }
+
+  // NEW: Reads SQLite's variable-length signed integers with proper sign
+  // extension
+  int64_t read_signed_integer(int bytes) {
+    int64_t result = 0;
+    for (int i = 0; i < bytes; i++) {
+      uint8_t byte;
+      db.read(reinterpret_cast<char *>(&byte), 1);
+
+      // If this is the very first byte and its leftmost bit is 1, the number is
+      // negative. We must sign-extend our 64-bit container by filling it with
+      // 1s first.
+      if (i == 0 && (byte & 0x80)) {
+        result = ~0ULL;
+      }
+      result = (result << 8) | byte;
+    }
+    return result;
+  }
 };
 
 // ---------------------------------------------------------
@@ -93,11 +112,17 @@ private:
     int index = 0;
 
     while (std::getline(ss, col_def, ',')) {
-      size_t first_char = col_def.find_first_not_of(' ');
+      size_t first_char = col_def.find_first_not_of(" \t\n\r");
       if (first_char != std::string::npos)
         col_def = col_def.substr(first_char);
-      if (col_def.find(target_col + " ") == 0 || col_def == target_col)
-        return index;
+
+      if (col_def.find(target_col) == 0) {
+        char next_char = col_def[target_col.length()];
+        if (next_char == ' ' || next_char == '\t' || next_char == '\n' ||
+            next_char == '\r' || next_char == '\0') {
+          return index;
+        }
+      }
       index++;
     }
     return -1;
@@ -177,10 +202,19 @@ private:
             std::string column_data(data_size, '\0');
             db.read(&column_data[0], data_size);
             retrieval.push_back(column_data);
+          } else if (target_serial >= 1 &&
+                     target_serial <= 6) { // INTEGER (1 to 8 bytes)
+            int64_t val = db.read_signed_integer(data_size);
+            retrieval.push_back(std::to_string(val));
+          } else if (target_serial == 8) { // INTEGER 0
+            retrieval.push_back("0");
+          } else if (target_serial == 9) { // INTEGER 1
+            retrieval.push_back("1");
           } else {
-            // Push an empty string so the indices don't get misaligned on NULLs
             retrieval.push_back("");
           }
+        } else {
+          retrieval.push_back("");
         }
       }
       return;
@@ -205,7 +239,6 @@ public:
       : db(db_ref), root_page(root), page_size(size), sql(schema) {}
 
   bool is_valid() const { return root_page != 0; }
-
   uint64_t count_rows() { return count_rows_recursive(root_page); }
 
   std::vector<std::string> retrieval;
@@ -215,7 +248,8 @@ public:
     if (col_idx != -1) {
       print_column_recursive(root_page, col_idx);
     } else {
-      std::cerr << "Column not found in schema!" << std::endl;
+      std::cerr << "Column not found in schema! [" << col_name << "]"
+                << std::endl;
     }
   }
 };
@@ -354,16 +388,18 @@ int main(int argc, char *argv[]) {
       std::cout << table.count_rows() << std::endl;
     else
       std::cerr << "Table not found!" << std::endl;
+
   } else if (lower_command.find("select ") == 0) {
     std::vector<std::string> words;
     std::string cur;
     std::stringstream ss(command);
 
-    // Safety against double spaces
     while (std::getline(ss, cur, ' ')) {
       if (!cur.empty())
         words.push_back(cur);
     }
+
+    // Fix single quote spacing issues
     for (int i = 0; i < words.size(); i++) {
       if (words[i][0] == char(39)) {
         for (int j = i + 1; j < words.size(); j++)
@@ -371,12 +407,20 @@ int main(int argc, char *argv[]) {
         words.erase(words.begin() + i + 1, words.end());
       }
     }
-    // std::cout << words.back() << "\n";
-    if (words[words.size() - 4] != "WHERE") {
-      // The table name is always the last word
-      std::string table_name = words.back();
 
-      // FIX 1: Fetch the table ONCE, outside the loop!
+    int from_idx = -1;
+    int where_idx = -1;
+    for (int i = 0; i < words.size(); i++) {
+      std::string w = words[i];
+      std::transform(w.begin(), w.end(), w.begin(), ::tolower);
+      if (w == "from")
+        from_idx = i;
+      if (w == "where")
+        where_idx = i;
+    }
+
+    if (from_idx != -1) {
+      std::string table_name = words[from_idx + 1];
       Table table = db.get_table(table_name);
 
       if (!table.is_valid()) {
@@ -386,70 +430,59 @@ int main(int argc, char *argv[]) {
 
       std::vector<std::vector<std::string>> info;
 
-      // Loop over the columns (words[1] to words[size-3])
-      for (int i = 1; i <= words.size() - 3; i++) {
-        while (!words[i].empty() && words[i].back() == ',') {
-          words[i].pop_back();
+      // Fetch all required columns (from index 1 up to 'FROM')
+      for (int i = 1; i < from_idx; i++) {
+        std::string col_name = words[i];
+        while (!col_name.empty() && col_name.back() == ',') {
+          col_name.pop_back();
         }
 
-        table.print_column(words[i]);
+        table.print_column(col_name);
         info.push_back(table.retrieval);
         table.retrieval.clear();
       }
 
-      // Output formatting
-      if (!info.empty() && !info[0].empty()) {
-        for (int i = 0; i < info[0].size(); i++) {
-          for (int j = 0; j < info.size(); j++) {
-            std::cout << info[j][i];
-            if (j != info.size() - 1)
-              std::cout << "|";
-            else
-              std::cout << "\n";
+      // If we found a WHERE clause
+      if (where_idx != -1) {
+        std::string cond_col = words[where_idx + 1];
+        std::string cond_col_match = words[where_idx + 3];
+
+        // Strip the single quotes off the matching string
+        if (cond_col_match.front() == '\'' && cond_col_match.back() == '\'') {
+          cond_col_match = cond_col_match.substr(1, cond_col_match.size() - 2);
+        }
+
+        table.print_column(cond_col);
+        std::vector<std::string> cond_col_data = table.retrieval;
+        table.retrieval.clear();
+
+        // Print matrix logic WITH where filter
+        if (!info.empty() && !info[0].empty()) {
+          for (int i = 0; i < info[0].size(); i++) {
+            if (cond_col_data[i] != cond_col_match)
+              continue; // Skip rows that don't match
+
+            for (int j = 0; j < info.size(); j++) {
+              std::cout << info[j][i];
+              if (j != info.size() - 1)
+                std::cout << "|";
+              else
+                std::cout << "\n";
+            }
           }
         }
       }
-    } else {
-      // The table name is always the last word
-      std::string table_name = words[words.size() - 5];
-      // FIX 1: Fetch the table ONCE, outside the loop!
-      Table table = db.get_table(table_name);
-
-      if (!table.is_valid()) {
-        std::cerr << "Table not found!" << std::endl;
-        return 0;
-      }
-
-      std::vector<std::vector<std::string>> info;
-
-      for (int i = 1; i <= words.size() - 7; i++) {
-        while (!words[i].empty() && words[i].back() == ',') {
-          words[i].pop_back();
-        }
-
-        table.print_column(words[i]);
-        info.push_back(table.retrieval);
-        table.retrieval.clear();
-      }
-
-      std::string cond_col_match =
-          words.back().substr(1, words.back().size() - 2);
-      std::string cond_col = words[words.size() - 3];
-      table.print_column(cond_col);
-      std::vector<std::string> cond_col_data = table.retrieval;
-      table.retrieval.clear();
-
-      // Output formatting
-      if (!info.empty() && !info[0].empty()) {
-        for (int i = 0; i < info[0].size(); i++) {
-          if (cond_col_data[i] != cond_col_match)
-            continue;
-          for (int j = 0; j < info.size(); j++) {
-            std::cout << info[j][i];
-            if (j != info.size() - 1)
-              std::cout << "|";
-            else
-              std::cout << "\n";
+      // Print matrix logic WITHOUT where filter
+      else {
+        if (!info.empty() && !info[0].empty()) {
+          for (int i = 0; i < info[0].size(); i++) {
+            for (int j = 0; j < info.size(); j++) {
+              std::cout << info[j][i];
+              if (j != info.size() - 1)
+                std::cout << "|";
+              else
+                std::cout << "\n";
+            }
           }
         }
       }
