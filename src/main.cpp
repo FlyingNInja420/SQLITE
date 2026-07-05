@@ -611,7 +611,8 @@ int main(int argc, char *argv[]) {
                     << std::endl;
           std::vector<std::vector<std::string>> fullinfo;
           table.full_table_scan(0, target_cols, fullinfo);
-          std::cerr << fullinfo.size() << std::endl;
+          std::cerr << fullinfo.size() << " " << fullinfo[0].size()
+                    << std::endl;
           int cond_idx_target = -1;
           for (int i = 0; i < target_cols.size(); i++)
             if (target_cols[i] == cond_col)
