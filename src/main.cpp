@@ -619,7 +619,7 @@ int main(int argc, char *argv[]) {
               cond_idx_target = i;
 
           for (auto &v_str : fullinfo) {
-            for (int i = 0; i < v_str.size() - 1; i++) {
+            for (int i = 0; i < v_str.size(); i++) {
               if (i == cond_idx_target && cond_col_match == v_str[i])
                 continue;
               std::cout << v_str[i];
