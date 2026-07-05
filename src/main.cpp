@@ -8,10 +8,6 @@
 #include <string>
 #include <vector>
 
-// ---------------------------------------------------------
-// 1. LOW-LEVEL BYTE UTILITIES
-// ---------------------------------------------------------
-
 uint16_t decode_size(uint64_t serial_type) {
   if (serial_type >= 13 && serial_type % 2 == 1)
     return (serial_type - 13) / 2; // TEXT
@@ -69,17 +65,11 @@ public:
     return result;
   }
 
-  // NEW: Reads SQLite's variable-length signed integers with proper sign
-  // extension
   int64_t read_signed_integer(int bytes) {
     int64_t result = 0;
     for (int i = 0; i < bytes; i++) {
       uint8_t byte;
       db.read(reinterpret_cast<char *>(&byte), 1);
-
-      // If this is the very first byte and its leftmost bit is 1, the number is
-      // negative. We must sign-extend our 64-bit container by filling it with
-      // 1s first.
       if (i == 0 && (byte & 0x80)) {
         result = ~0ULL;
       }
@@ -89,8 +79,85 @@ public:
   }
 };
 
+class Index {
+private:
+  DatabaseUtils &db;
+  uint32_t root_page;
+  uint16_t page_size;
+
+  void find_rowids(uint32_t page_num, const std::string &target_val,
+                   std::vector<int64_t> &rowids) {
+    uint64_t offset = (page_num - 1) * page_size;
+    db.seekg(offset);
+    uint8_t page_type;
+    db.read(reinterpret_cast<char *>(&page_type), 1);
+    db.seekg(offset + 3);
+    uint16_t num_cells = db.read_integer(2);
+
+    // Index Interior Pages (0x02) start cells at offset 12. Leaf Pages (0x0A)
+    // start at 8.
+    uint16_t cell_arr_offset = (page_type == 0x02) ? 12 : 8;
+
+    for (int i = 0; i < num_cells; i++) {
+      db.seekg(offset + cell_arr_offset + (i * 2));
+      uint16_t cell_ptr = db.read_integer(2);
+      db.seekg(offset + cell_ptr);
+
+      uint32_t left_child = 0;
+      if (page_type == 0x02) {
+        left_child = db.read_integer(4);
+      }
+
+      db.read_var(); // Payload size
+
+      // Parse Index Record Header
+      uint64_t header_start = db.tellg();
+      uint64_t size_of_header = db.read_var();
+      uint64_t col1_serial = db.read_var(); // The index key (country string)
+      uint64_t col2_serial = db.read_var(); // The main table RowID
+
+      db.seekg(header_start + size_of_header);
+
+      // Read Column 1 (Country string)
+      uint16_t col1_size = decode_size(col1_serial);
+      std::string index_key(col1_size, '\0');
+      db.read(&index_key[0], col1_size);
+
+      // If it matches, extract the RowID!
+      if (index_key == target_val) {
+        uint16_t col2_size = decode_size(col2_serial);
+        int64_t rowid = db.read_signed_integer(col2_size);
+        rowids.push_back(rowid);
+      }
+
+      if (page_type == 0x02 && left_child != 0) {
+        find_rowids(left_child, target_val, rowids);
+      }
+    }
+
+    // Follow rightmost pointer on interior pages
+    if (page_type == 0x02) {
+      db.seekg(offset + 8);
+      uint32_t rightmost = db.read_integer(4);
+      find_rowids(rightmost, target_val, rowids);
+    }
+  }
+
+public:
+  Index(DatabaseUtils &db_ref, uint32_t root, uint16_t size)
+      : db(db_ref), root_page(root), page_size(size) {}
+
+  bool is_valid() const { return root_page != 0; }
+
+  std::vector<int64_t> search(const std::string &target_val) {
+    std::vector<int64_t> rowids;
+    find_rowids(root_page, target_val, rowids);
+    return rowids;
+  }
+};
+
 // ---------------------------------------------------------
-// 2. TABLE CLASS
+// 3. TABLE CLASS (The Second Hop)
 // ---------------------------------------------------------
 
 class Table {
@@ -99,7 +166,7 @@ private:
   uint32_t root_page;
   uint16_t page_size;
   std::string sql;
-  int rowid_col_idx = -1; // <-- Add this to track the RowID alias column
+  int rowid_col_idx = -1;
 
   int get_column_index(const std::string &target_col) {
     size_t start = sql.find('(');
@@ -135,7 +202,6 @@ private:
 
     uint8_t page_type;
     db.read(reinterpret_cast<char *>(&page_type), 1);
-
     db.seekg(offset + 3);
     uint16_t num_cells = db.read_integer(2);
 
@@ -164,7 +230,6 @@ private:
 
     uint8_t page_type;
     db.read(reinterpret_cast<char *>(&page_type), 1);
-
     db.seekg(offset + 3);
     uint16_t num_cells = db.read_integer(2);
 
@@ -174,9 +239,8 @@ private:
         uint16_t cell_ptr = db.read_integer(2);
 
         db.seekg(offset + cell_ptr);
-        db.read_var(); // Payload Size
-        uint64_t row_id =
-            db.read_var(); // <-- Save the RowID instead of throwing it away!
+        db.read_var();                   // Payload Size
+        uint64_t row_id = db.read_var(); // Save the RowID
 
         uint64_t header_start = db.tellg();
         uint64_t size_of_header = db.read_var();
@@ -193,11 +257,9 @@ private:
         for (int c = 0; c < col_index && c < serial_types.size(); c++) {
           data_offset += decode_size(serial_types[c]);
         }
-
         db.seekg(header_start + size_of_header + data_offset);
 
         if (col_index == rowid_col_idx) {
-          // If this is the INTEGER PRIMARY KEY column, use the RowID we saved!
           retrieval.push_back(std::to_string(static_cast<int64_t>(row_id)));
         } else if (col_index < serial_types.size()) {
           uint64_t target_serial = serial_types[col_index];
@@ -207,13 +269,12 @@ private:
             std::string column_data(data_size, '\0');
             db.read(&column_data[0], data_size);
             retrieval.push_back(column_data);
-          } else if (target_serial >= 1 &&
-                     target_serial <= 6) { // INTEGER (1 to 8 bytes)
+          } else if (target_serial >= 1 && target_serial <= 6) { // INTEGER
             int64_t val = db.read_signed_integer(data_size);
             retrieval.push_back(std::to_string(val));
-          } else if (target_serial == 8) { // INTEGER 0
+          } else if (target_serial == 8) {
             retrieval.push_back("0");
-          } else if (target_serial == 9) { // INTEGER 1
+          } else if (target_serial == 9) {
             retrieval.push_back("1");
           } else {
             retrieval.push_back("");
@@ -239,11 +300,106 @@ private:
     }
   }
 
+  // -------------------------------------------------------------
+  // THE TABLE BINARY SEARCH (Required for the 3 second limit!)
+  // -------------------------------------------------------------
+  void search_and_print_row(uint32_t page_num, int64_t target_rowid,
+                            const std::vector<int> &col_indices) {
+    uint64_t offset = (page_num - 1) * page_size;
+    db.seekg(offset);
+
+    uint8_t page_type;
+    db.read(reinterpret_cast<char *>(&page_type), 1);
+    db.seekg(offset + 3);
+    uint16_t num_cells = db.read_integer(2);
+
+    if (page_type == 0x05) { // Interior B-Tree Page
+      for (int i = 0; i < num_cells; i++) {
+        db.seekg(offset + 12 + (i * 2));
+        uint16_t cell_ptr = db.read_integer(2);
+        db.seekg(offset + cell_ptr);
+
+        uint32_t left_child = db.read_integer(4);
+        uint64_t cell_key =
+            db.read_var(); // This is the Integer Key for Binary Search!
+
+        if (target_rowid <= static_cast<int64_t>(cell_key)) {
+          // We found the path down! Jump left and abort this loop immediately.
+          search_and_print_row(left_child, target_rowid, col_indices);
+          return;
+        }
+      }
+      // If the target is bigger than all cell keys, go rightmost.
+      db.seekg(offset + 8);
+      uint32_t rightmost = db.read_integer(4);
+      search_and_print_row(rightmost, target_rowid, col_indices);
+      return;
+    }
+
+    if (page_type == 0x0D) { // Leaf B-Tree Page
+      for (int i = 0; i < num_cells; i++) {
+        db.seekg(offset + 8 + (i * 2));
+        uint16_t cell_ptr = db.read_integer(2);
+
+        db.seekg(offset + cell_ptr);
+        db.read_var(); // Payload size
+        uint64_t row_id = db.read_var();
+
+        if (static_cast<int64_t>(row_id) == target_rowid) {
+          // WE FOUND THE ROW! Decode all requested columns.
+          uint64_t header_start = db.tellg();
+          uint64_t size_of_header = db.read_var();
+          uint64_t bytes_read = db.tellg() - header_start;
+
+          std::vector<uint64_t> serial_types;
+          while (bytes_read < size_of_header) {
+            uint64_t before = db.tellg();
+            serial_types.push_back(db.read_var());
+            bytes_read += (db.tellg() - before);
+          }
+
+          std::vector<uint64_t> data_offsets(serial_types.size(), 0);
+          uint64_t current_offset = 0;
+          for (size_t c = 0; c < serial_types.size(); c++) {
+            data_offsets[c] = current_offset;
+            current_offset += decode_size(serial_types[c]);
+          }
+
+          for (size_t k = 0; k < col_indices.size(); k++) {
+            int col_index = col_indices[k];
+
+            if (col_index == rowid_col_idx) {
+              std::cout << row_id;
+            } else if (col_index < serial_types.size()) {
+              uint64_t target_serial = serial_types[col_index];
+              uint16_t data_size = decode_size(target_serial);
+              db.seekg(header_start + size_of_header + data_offsets[col_index]);
+
+              if (target_serial >= 13 && target_serial % 2 == 1) { // TEXT
+                std::string column_data(data_size, '\0');
+                db.read(&column_data[0], data_size);
+                std::cout << column_data;
+              } else if (target_serial >= 1 && target_serial <= 6) { // INTEGER
+                std::cout << db.read_signed_integer(data_size);
+              } else if (target_serial == 8) {
+                std::cout << "0";
+              } else if (target_serial == 9) {
+                std::cout << "1";
+              }
+            }
+            if (k < col_indices.size() - 1)
+              std::cout << "|";
+          }
+          std::cout << std::endl;
+          return;
+        }
+      }
+    }
+  }
+
 public:
   Table(DatabaseUtils &db_ref, uint32_t root, uint16_t size, std::string schema)
       : db(db_ref), root_page(root), page_size(size), sql(schema) {
-
-    // Automatically scan the schema to find which column is the RowID alias
     if (!sql.empty()) {
       size_t start = sql.find('(');
       size_t end = sql.find_last_of(')');
@@ -256,7 +412,6 @@ public:
           std::string lower_col = col;
           std::transform(lower_col.begin(), lower_col.end(), lower_col.begin(),
                          ::tolower);
-          // Catch any variation like "INTEGER PRIMARY KEY AUTOINCREMENT"
           if (lower_col.find("integer primary key") != std::string::npos) {
             rowid_col_idx = idx;
             break;
@@ -281,10 +436,19 @@ public:
                 << std::endl;
     }
   }
+
+  void print_row_by_id(int64_t target_rowid,
+                       const std::vector<std::string> &col_names) {
+    std::vector<int> col_indices;
+    for (const auto &name : col_names) {
+      col_indices.push_back(get_column_index(name));
+    }
+    search_and_print_row(root_page, target_rowid, col_indices);
+  }
 };
 
 // ---------------------------------------------------------
-// 3. DATABASE CLASS
+// 4. DATABASE CLASS
 // ---------------------------------------------------------
 
 struct SchemaEntry {
@@ -315,7 +479,6 @@ private:
 
       uint64_t header_start = db.tellg();
       uint64_t size_of_header = db.read_var();
-
       uint64_t serial_type = db.read_var();
       uint64_t serial_name = db.read_var();
       uint64_t serial_tbl_name = db.read_var();
@@ -381,10 +544,20 @@ public:
     }
     return Table(db, 0, page_size, "");
   }
+
+  Index get_index_for_table(const std::string &target_table) {
+    for (const auto &entry : parse_schema()) {
+      // Return the first index associated with this table
+      if (entry.type == "index" && entry.tbl_name == target_table) {
+        return Index(db, entry.root_page, page_size);
+      }
+    }
+    return Index(db, 0, page_size);
+  }
 };
 
 // ---------------------------------------------------------
-// 4. MAIN (The Text Router)
+// 5. MAIN (The Text Router)
 // ---------------------------------------------------------
 
 int main(int argc, char *argv[]) {
@@ -428,7 +601,6 @@ int main(int argc, char *argv[]) {
         words.push_back(cur);
     }
 
-    // Fix single quote spacing issues
     for (int i = 0; i < words.size(); i++) {
       if (words[i][0] == char(39)) {
         for (int j = i + 1; j < words.size(); j++)
@@ -457,52 +629,77 @@ int main(int argc, char *argv[]) {
         return 0;
       }
 
-      std::vector<std::vector<std::string>> info;
-
-      // Fetch all required columns (from index 1 up to 'FROM')
+      std::vector<std::string> target_cols;
       for (int i = 1; i < from_idx; i++) {
         std::string col_name = words[i];
         while (!col_name.empty() && col_name.back() == ',') {
           col_name.pop_back();
         }
-
-        table.print_column(col_name);
-        info.push_back(table.retrieval);
-        table.retrieval.clear();
+        target_cols.push_back(col_name);
       }
 
-      // If we found a WHERE clause
+      // -------------------------------------------------------------
+      // STAGE 10/11: INDEX SEARCH ARCHITECTURE
+      // -------------------------------------------------------------
       if (where_idx != -1) {
-        std::string cond_col = words[where_idx + 1];
         std::string cond_col_match = words[where_idx + 3];
-
-        // Strip the single quotes off the matching string
         if (cond_col_match.front() == '\'' && cond_col_match.back() == '\'') {
           cond_col_match = cond_col_match.substr(1, cond_col_match.size() - 2);
         }
 
-        table.print_column(cond_col);
-        std::vector<std::string> cond_col_data = table.retrieval;
-        table.retrieval.clear();
+        // STEP 1: Get the Index for this table
+        Index index = db.get_index_for_table(table_name);
 
-        // Print matrix logic WITH where filter
-        if (!info.empty() && !info[0].empty()) {
-          for (int i = 0; i < info[0].size(); i++) {
-            if (cond_col_data[i] != cond_col_match)
-              continue; // Skip rows that don't match
+        if (index.is_valid()) {
+          // STEP 2: DFS the Index Tree to find all associated RowIDs
+          std::vector<int64_t> matching_rowids = index.search(cond_col_match);
 
-            for (int j = 0; j < info.size(); j++) {
-              std::cout << info[j][i];
-              if (j != info.size() - 1)
-                std::cout << "|";
-              else
-                std::cout << "\n";
+          // STEP 3: Instantly binary search the 1GB table for those specific
+          // rows
+          for (int64_t rowid : matching_rowids) {
+            table.print_row_by_id(rowid, target_cols);
+          }
+        } else {
+          // (Fallback behavior) If there is no index, we must run the old
+          // full-table scan filter
+          std::vector<std::vector<std::string>> info;
+          for (const auto &col_name : target_cols) {
+            table.print_column(col_name);
+            info.push_back(table.retrieval);
+            table.retrieval.clear();
+          }
+
+          std::string cond_col = words[where_idx + 1];
+          table.print_column(cond_col);
+          std::vector<std::string> cond_col_data = table.retrieval;
+          table.retrieval.clear();
+
+          if (!info.empty() && !info[0].empty()) {
+            for (int i = 0; i < info[0].size(); i++) {
+              if (cond_col_data[i] != cond_col_match)
+                continue;
+              for (int j = 0; j < info.size(); j++) {
+                std::cout << info[j][i];
+                if (j != info.size() - 1)
+                  std::cout << "|";
+                else
+                  std::cout << "\n";
+              }
             }
           }
         }
       }
-      // Print matrix logic WITHOUT where filter
+      // -------------------------------------------------------------
+      // OLD FULL TABLE SCAN (No WHERE clause)
+      // -------------------------------------------------------------
       else {
+        std::vector<std::vector<std::string>> info;
+        for (const auto &col_name : target_cols) {
+          table.print_column(col_name);
+          info.push_back(table.retrieval);
+          table.retrieval.clear();
+        }
+
         if (!info.empty() && !info[0].empty()) {
           for (int i = 0; i < info[0].size(); i++) {
             for (int j = 0; j < info.size(); j++) {
