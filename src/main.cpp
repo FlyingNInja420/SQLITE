@@ -104,13 +104,17 @@ public:
       } else if (serial == 9) {
         columns.push_back("1");
       } else {
-        db.seekg(db.tellg() + data_size); // Skip unhandled types (Blobs/Nulls)
+        db.seekg(db.tellg() + data_size);
         columns.push_back("");
       }
     }
     return columns;
   }
 };
+
+// ---------------------------------------------------------
+// 2. INDEX CLASS
+// ---------------------------------------------------------
 
 class Index {
 private:
@@ -128,13 +132,13 @@ private:
     db.seekg(offset + 3);
     uint16_t num_cells = db.read_integer(2);
 
-    if (page_type == 0x0A) { // Leaf Index Page
+    if (page_type == 0x0A) {
       for (int i = 0; i < num_cells; i++) {
         db.seekg(offset + 8 + (i * 2));
         uint16_t cell_ptr = db.read_integer(2);
         db.seekg(offset + cell_ptr);
 
-        db.read_var(); // Payload size
+        db.read_var();
         std::vector<std::string> record = db.parse_record();
         if (record.empty())
           continue;
@@ -143,10 +147,10 @@ private:
         if (index_key == target_val) {
           rowids.push_back(std::stoll(record[1]));
         } else if (index_key > target_val) {
-          break; // Optimal binary search exit
+          break;
         }
       }
-    } else if (page_type == 0x02) { // Interior Index Page
+    } else if (page_type == 0x02) {
       bool followed_path = false;
       for (int i = 0; i < num_cells; i++) {
         db.seekg(offset + 12 + (i * 2));
@@ -154,7 +158,7 @@ private:
         db.seekg(offset + cell_ptr);
 
         uint32_t left_child = db.read_integer(4);
-        db.read_var(); // Payload size
+        db.read_var();
         std::vector<std::string> record = db.parse_record();
         if (record.empty())
           continue;
@@ -193,6 +197,10 @@ public:
     return rowids;
   }
 };
+
+// ---------------------------------------------------------
+// 3. TABLE CLASS (Streaming Architecture)
+// ---------------------------------------------------------
 
 class Table {
 private:
@@ -245,32 +253,18 @@ private:
   }
 
   void print_row_format(const std::vector<std::string> &record, int64_t rowid,
-                        const std::vector<int> &target_indices,
-                        std::vector<std::string> *to_load = nullptr) {
-    if (to_load == nullptr) {
-      for (size_t k = 0; k < target_indices.size(); k++) {
-        int idx = target_indices[k];
-        if (idx == rowid_col_idx) {
-          std::cout << rowid;
-        } else if (idx < record.size()) {
-          std::cout << record[idx];
-        }
-        if (k < target_indices.size() - 1)
-          std::cout << "|";
+                        const std::vector<int> &target_indices) {
+    for (size_t k = 0; k < target_indices.size(); k++) {
+      int idx = target_indices[k];
+      if (idx == rowid_col_idx) {
+        std::cout << rowid;
+      } else if (idx >= 0 && idx < record.size()) {
+        std::cout << record[idx];
       }
-      std::cout << std::endl;
-    } else {
-      std::vector<std::string> current_loader;
-      for (size_t k = 0; k < target_indices.size(); k++) {
-        int idx = target_indices[k];
-        if (idx == rowid_col_idx) {
-          current_loader.push_back(std::to_string(rowid));
-        } else {
-          current_loader.push_back(record[idx]);
-        }
-      }
-      *to_load = current_loader;
+      if (k < target_indices.size() - 1)
+        std::cout << "|";
     }
+    std::cout << std::endl;
   }
 
   uint64_t count_rows_recursive(uint32_t page_num) {
@@ -310,56 +304,7 @@ public:
   bool is_valid() const { return root_page != 0; }
   uint64_t count_rows() { return count_rows_recursive(root_page); }
 
-  void full_table_scan(uint32_t page_num,
-                       const std::vector<std::string> &target_cols,
-                       std::vector<std::vector<std::string>> &load_it) {
-    if (page_num == 0)
-      page_num = root_page;
-
-    std::vector<int> col_indices;
-    for (const auto &name : target_cols)
-      col_indices.push_back(get_column_index(name));
-
-    uint64_t offset = (page_num - 1) * page_size;
-    db.seekg(offset);
-
-    uint8_t page_type;
-    db.read(reinterpret_cast<char *>(&page_type), 1);
-    db.seekg(offset + 3);
-    uint16_t num_cells = db.read_integer(2);
-
-    if (page_type == 0x05) {
-      for (int i = 0; i < num_cells; i++) {
-        db.seekg(offset + 12 + (i * 2));
-        uint16_t cell_ptr = db.read_integer(2);
-        db.seekg(offset + cell_ptr);
-
-        uint32_t left_child = db.read_integer(4);
-        uint64_t cell_key = db.read_var();
-
-        full_table_scan(left_child, target_cols, load_it);
-        return;
-      }
-      db.seekg(offset + 8);
-      uint32_t rightmost = db.read_integer(4);
-      full_table_scan(rightmost, target_cols, load_it);
-    } else if (page_type == 0x0D) {
-      for (int i = 0; i < num_cells; i++) {
-        db.seekg(offset + 8 + (i * 2));
-        uint16_t cell_ptr = db.read_integer(2);
-        db.seekg(offset + cell_ptr);
-
-        db.read_var();
-        uint64_t row_id = db.read_var();
-
-        std::vector<std::string> record = db.parse_record();
-        load_it.push_back({"Pushed_nothing"});
-        print_row_format(record, row_id, col_indices, &(load_it.back()));
-        return;
-      }
-    }
-  }
-
+  // Fast Single-Row Lookup (Index Search Extension)
   void print_row_by_id(uint32_t page_num, int64_t target_rowid,
                        const std::vector<std::string> &target_cols) {
     if (page_num == 0)
@@ -411,7 +356,76 @@ public:
       }
     }
   }
+
+  // Full Table Scan with Optional WHERE Filtering
+  void full_scan(uint32_t page_num, const std::vector<std::string> &target_cols,
+                 const std::string &where_col = "",
+                 const std::string &where_val = "") {
+    if (page_num == 0)
+      page_num = root_page;
+
+    std::vector<int> target_indices;
+    for (const auto &name : target_cols)
+      target_indices.push_back(get_column_index(name));
+
+    int where_idx = -1;
+    if (!where_col.empty()) {
+      where_idx = get_column_index(where_col);
+      if (where_idx == -1)
+        return; // Malformed query, column not found
+    }
+
+    uint64_t offset = (page_num - 1) * page_size;
+    db.seekg(offset);
+
+    uint8_t page_type;
+    db.read(reinterpret_cast<char *>(&page_type), 1);
+    db.seekg(offset + 3);
+    uint16_t num_cells = db.read_integer(2);
+
+    if (page_type == 0x05) {
+      for (int i = 0; i < num_cells; i++) {
+        db.seekg(offset + 12 + (i * 2));
+        uint16_t cell_ptr = db.read_integer(2);
+        db.seekg(offset + cell_ptr);
+        uint32_t left_child = db.read_integer(4);
+        full_scan(left_child, target_cols, where_col, where_val);
+      }
+      db.seekg(offset + 8);
+      uint32_t rightmost = db.read_integer(4);
+      full_scan(rightmost, target_cols, where_col, where_val);
+    } else if (page_type == 0x0D) {
+      for (int i = 0; i < num_cells; i++) {
+        db.seekg(offset + 8 + (i * 2));
+        uint16_t cell_ptr = db.read_integer(2);
+        db.seekg(offset + cell_ptr);
+
+        db.read_var(); // Payload size
+        uint64_t row_id = db.read_var();
+
+        std::vector<std::string> record = db.parse_record();
+
+        bool print_this = true;
+        if (where_idx != -1) {
+          std::string actual_val =
+              (where_idx == rowid_col_idx)
+                  ? std::to_string(row_id)
+                  : (where_idx < record.size() ? record[where_idx] : "");
+          if (actual_val != where_val)
+            print_this = false;
+        }
+
+        if (print_this) {
+          print_row_format(record, row_id, target_indices);
+        }
+      }
+    }
+  }
 };
+
+// ---------------------------------------------------------
+// 4. DATABASE CLASS
+// ---------------------------------------------------------
 
 struct SchemaEntry {
   std::string type;
@@ -436,8 +450,8 @@ private:
       uint16_t celloff = db.read_integer(2);
 
       db.seekg(celloff);
-      db.read_var(); // Payload Size
-      db.read_var(); // RowID
+      db.read_var();
+      db.read_var();
 
       std::vector<std::string> record = db.parse_record();
       if (record.size() >= 5) {
@@ -487,8 +501,6 @@ public:
                             const std::string &target_col) {
     for (const auto &entry : parse_schema()) {
       if (entry.type == "index" && entry.tbl_name == target_table) {
-        // Minor fix: Check if column name is strictly within the index creation
-        // string
         if (entry.sql.find("(" + target_col + ")") != std::string::npos ||
             entry.sql.find(target_col) != std::string::npos) {
           return Index(db, entry.root_page, page_size);
@@ -534,7 +546,6 @@ int main(int argc, char *argv[]) {
       std::cerr << "Table not found!" << std::endl;
     }
   } else if (lower_command.find("select ") == 0) {
-    // Simple SQL Parser
     std::vector<std::string> words;
     std::string cur;
     std::stringstream ss(command);
@@ -590,7 +601,6 @@ int main(int argc, char *argv[]) {
         std::string cond_col = words[where_idx + 1];
         std::string cond_col_match = words[where_idx + 3];
 
-        // Strip quotes from the search term
         if (cond_col_match.front() == '\'' && cond_col_match.back() == '\'') {
           cond_col_match = cond_col_match.substr(1, cond_col_match.size() - 2);
         }
@@ -598,47 +608,18 @@ int main(int argc, char *argv[]) {
         Index index = db.get_index_for_table(table_name, cond_col);
 
         if (index.is_valid()) {
-          // BINARY SEARCH: Fetch matching rowids from the index
+          // FAST PATH: Index is available
           std::vector<int64_t> matching_rowids = index.search(cond_col_match);
-
-          // FETCH: Look up those specific rowids in the actual table
           for (int64_t rowid : matching_rowids) {
             table.print_row_by_id(0, rowid, target_cols);
           }
         } else {
-          std::cerr << "Full table scans not implemented in streaming "
-                       "architecture. Index required."
-                    << std::endl;
-          std::vector<std::vector<std::string>> fullinfo;
-          table.full_table_scan(0, target_cols, fullinfo);
-          std::cerr << fullinfo.size() << " " << fullinfo[0].size()
-                    << std::endl;
-          int cond_idx_target = -1;
-          for (int i = 0; i < target_cols.size(); i++)
-            if (target_cols[i] == cond_col)
-              cond_idx_target = i;
-
-          for (auto &v_str : fullinfo) {
-            for (int i = 0; i < v_str.size(); i++) {
-              if (i == cond_idx_target && cond_col_match == v_str[i])
-                continue;
-              std::cout << v_str[i];
-              if (i != v_str.size() - 1)
-                std::cout << "|";
-              else
-                std::cout << "\n";
-            }
-          }
+          // SLOW PATH: Full Table Scan with condition
+          table.full_scan(0, target_cols, cond_col, cond_col_match);
         }
       } else {
-        std::cerr << "print without where\n";
-        std::vector<std::vector<std::string>> fullinfo;
-        table.full_table_scan(0, target_cols, fullinfo);
-        for (auto &v_str : fullinfo) {
-          for (int i = 0; i < v_str.size() - 1; i++)
-            std::cout << v_str[i] << "|";
-          std::cout << v_str.back() << "\n";
-        }
+        // NORMAL PRINT: Full Table Scan without conditions
+        table.full_scan(0, target_cols);
       }
     }
   }
