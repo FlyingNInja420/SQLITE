@@ -354,7 +354,7 @@ public:
 
         std::vector<std::string> record = db.parse_record();
         load_it.push_back({"Pushed_nothing"});
-        print_row_format(record, row_id, col_indices, &load_it.back());
+        print_row_format(record, row_id, col_indices, &(load_it.back()));
         return;
       }
     }
